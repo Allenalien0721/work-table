@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>工作表</title>
+
+  <!-- iOS PWA 必要設定 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="工作表">
+
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", sans-serif; margin: 20px; }
+    h1 { margin-bottom: 6px; }
+    textarea { width: 100%; min-height: 90px; font-size: 16px; padding: 10px; }
+    button { padding: 10px 14px; font-size: 16px; border-radius: 10px; border: 1px solid #ccc; background: #fff; }
+    button:disabled { opacity: 0.5; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { border-bottom: 1px solid #eee; padding: 12px 0; }
+    .date { color: #666; font-size: 13px; margin-top: 6px; }
+    .muted { color: #666; font-size: 13px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .status { margin-top: 10px; }
+    .err { color: #b00020; }
+  </style>
+</head>
+
+<body>
+  <h1>工作表</h1>
+  <div class="row">
+    <span class="muted">雲端同步：Google Sheets</span>
+    <span class="muted" id="syncState">（未連線）</span>
+  </div>
+
+  <div class="status muted" id="status"></div>
+
+  <div style="margin-top:12px;">
+    <textarea id="memo" placeholder="輸入工作備忘…"></textarea>
+    <div class="row" style="margin-top:10px;">
+      <button id="btnAdd" onclick="addMemo()">送出</button>
+      <button onclick="refresh()">重新整理</button>
+      <span class="muted" id="count"></span>
+    </div>
+  </div>
+
+  <h2 style="margin-top:18px;">紀錄</h2>
+  <ul id="list"></ul>
+
+  <script>
+    // ====== 你的雲端 API 設定（已填好） ======
+    const API_URL = "https://script.google.com/macros/s/AKfycbz0qFklX1BidtBbnIw6Q1jFTVw_s3oWGwxfQ-FC3nTJE_pewC50Mx2V-_4I4j1nszW2/exec";
+    const TOKEN = "94879487948794879487";
+    const DEFAULT_LIMIT = 200;
+
+    const $ = (id) => document.getElementById(id);
+
+    function setStatus(msg, isError=false) {
+      $("status").textContent = msg || "";
+      $("status").className = "status " + (isError ? "err" : "muted");
+    }
+
+    function setSyncState(ok) {
+      $("syncState").textContent = ok ? "（已連線）" : "（未連線）";
+    }
+
+    function fmtItem(item) {
+      // item: {id, text, createdAt, createdAtISO, source}
+      const safeText = escapeHtml(item.text);
+      const safeDate = escapeHtml(item.createdAt || item.createdAtISO || "");
+      const safeSource = escapeHtml(item.source || "");
+      return `
+        <div><strong>#${item.id}</strong> ${safeText}</div>
+        <div class="date">${safeDate}${safeSource ? " · " + safeSource : ""}</div>
+      `;
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    async function apiGet(action, params={}) {
+      const url = new URL(API_URL);
+      url.searchParams.set("token", TOKEN);
+      url.searchParams.set("action", action);
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
+
+      const res = await fetch(url.toString(), { method: "GET" });
+      return await res.json();
+    }
+
+    async function apiPost(action, bodyParams={}) {
+      // 用 x-www-form-urlencoded 避免 iOS/跨網域預檢問題
+      const form = new URLSearchParams();
+      form.set("token", TOKEN);
+      form.set("action", action);
+      for (const [k, v] of Object.entries(bodyParams)) form.set(k, String(v));
+
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: form.toString()
+      });
+      return await res.json();
+    }
+
+    async function refresh() {
+      $("btnAdd").disabled = true;
+      setStatus("同步中…");
+      try {
+        // 先 ping 確認連線
+        const ping = await apiGet("ping");
+        if (!ping.ok) throw new Error(ping.error || "Ping failed");
+        setSyncState(true);
+
+        const data = await apiGet("list", { limit: DEFAULT_LIMIT });
+        if (!data.ok) throw new Error(data.error || "List failed");
+
+        renderList(data.items || []);
+        setStatus("同步完成");
+      } catch (err) {
+        setSyncState(false);
+        setStatus("同步失敗：" + (err.message || err), true);
+      } finally {
+        $("btnAdd").disabled = false;
+      }
+    }
+
+    function renderList(items) {
+      $("count").textContent = `共 ${items.length} 筆（最新在最上）`;
+      const ul = $("list");
+      ul.innerHTML = "";
+
+      if (!items.length) {
+        const li = document.createElement("li");
+        li.innerHTML = `<span class="muted">目前沒有備忘，先寫一則試試看。</span>`;
+        ul.appendChild(li);
+        return;
+      }
+
+      for (const item of items) {
+        const li = document.createElement("li");
+        li.innerHTML = fmtItem(item);
+        ul.appendChild(li);
+      }
+    }
+
+    async function addMemo() {
+      const text = $("memo").value.trim();
+      if (!text) return;
+
+      $("btnAdd").disabled = true;
+      setStatus("送出中…");
+      try {
+        const out = await apiPost("add", {
+          text,
+          source: "iphone"
+        });
+        if (!out.ok) throw new Error(out.error || "Add failed");
+
+        $("memo").value = "";
+        await refresh(); // 送出後立刻拉最新清單
+      } catch (err) {
+        setStatus("送出失敗：" + (err.message || err), true);
+      } finally {
+        $("btnAdd").disabled = false;
+      }
+    }
+
+    // 初次載入就同步
+    refresh();
+  </script>
+</body>
+</html>
